@@ -56,6 +56,22 @@ type Order = {
   time: string;
 };
 
+type BinanceTradeHistory = {
+  id: string;
+  tradeId: number;
+  orderId: number;
+  pair: string;
+  symbol: string;
+  side: "Buy" | "Sell";
+  amount: number;
+  price: number;
+  quoteAmount: number;
+  commission: number;
+  commissionAsset: string;
+  time: number;
+  maker: boolean;
+};
+
 const COINS: Coin[] = [
   { symbol: "BTC", name: "Bitcoin", price: 67241.8, change: 2.42, volume: "$32.8B", icon: "₿", color: "#f7931a" },
   { symbol: "ETH", name: "Ethereum", price: 3468.24, change: 1.18, volume: "$14.2B", icon: "◆", color: "#627eea" },
@@ -66,6 +82,7 @@ const COINS: Coin[] = [
   { symbol: "AVAX", name: "Avalanche", price: 37.16, change: 3.09, volume: "$473M", icon: "A", color: "#e84142" },
   { symbol: "LINK", name: "Chainlink", price: 14.92, change: 2.01, volume: "$428M", icon: "L", color: "#2a5ada" },
 ];
+const TRADE_HISTORY_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX", "LINK", "ADA", "DOT", "NEAR", "LTC"];
 
 const TIMEFRAMES = ["1m", "5m", "15m", "1H", "4H", "1D"];
 const BINANCE_INTERVAL: Record<string, string> = { "1m": "1m", "5m": "5m", "15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d" };
@@ -891,11 +908,16 @@ export default function Home() {
   const [activeSymbol, setActiveSymbol] = useState("BTC");
   const [timeframe, setTimeframe] = useState("1H");
   const [orders, setOrders] = useState<Order[]>([]);
+  const [tradeHistory, setTradeHistory] = useState<BinanceTradeHistory[]>([]);
+  const [tradeHistoryLoading, setTradeHistoryLoading] = useState(true);
+  const [tradeHistoryError, setTradeHistoryError] = useState("");
+  const [tradeHistoryRefresh, setTradeHistoryRefresh] = useState(0);
   const [toast, setToast] = useState("");
   const [liveTrading, setLiveTrading] = useState(false);
   const [accountAssets, setAccountAssets] = useState<AccountAsset[]>([]);
   const [accountConnected, setAccountConnected] = useState(false);
   const [accountLoading, setAccountLoading] = useState(true);
+  const [accountRefresh, setAccountRefresh] = useState(0);
   const [activeStrategy, setActiveStrategy] = useState<StrategyKey>("ema-cross");
   const [assignedStrategies, setAssignedStrategies] = useState<StrategyKey[]>(DEFAULT_STRATEGIES);
   const [signalConfig, setSignalConfig] = useState<SignalConfig | null>(null);
@@ -907,6 +929,10 @@ export default function Home() {
   const activeStrategyMeta = STRATEGY_CATALOG.find((strategy) => strategy.key === activeStrategy) ?? STRATEGY_CATALOG[0];
   const heldPosition = accountAssets.find((asset) => asset.symbol === coin.symbol && asset.amount > 0);
   const heldLastBuyPrice = heldPosition?.lastBuyPrice && heldPosition.lastBuyPrice > 0 ? heldPosition.lastBuyPrice : null;
+  const tradeSymbols = useMemo(() => Array.from(new Set([
+    ...TRADE_HISTORY_SYMBOLS,
+    ...accountAssets.filter((asset) => !["USDT", "USDC", "FDUSD", "TUSD"].includes(asset.symbol)).map((asset) => asset.symbol),
+  ])).slice(0, 20).join(","), [accountAssets]);
 
   useEffect(() => {
     const signalConfigTimer = window.setTimeout(() => setSignalConfig(readSignalConfig()), 0);
@@ -1011,11 +1037,34 @@ export default function Home() {
     void refreshAccount();
     const interval = window.setInterval(refreshAccount, 30000);
     return () => { disposed = true; window.clearInterval(interval); };
-  }, [activeSymbol]);
+  }, [accountRefresh, activeSymbol]);
+
+  useEffect(() => {
+    let disposed = false;
+    async function refreshTradeHistory() {
+      setTradeHistoryLoading(true);
+      try {
+        const response = await fetch(`/api/binance/trades?symbols=${encodeURIComponent(tradeSymbols)}&limit=1000`, { cache: "no-store" });
+        const payload = await response.json() as { trades?: BinanceTradeHistory[]; error?: string; partialError?: string | null };
+        if (!response.ok || !payload.trades) throw new Error(payload.error || "Unable to load Binance trade history");
+        if (disposed) return;
+        setTradeHistory(payload.trades);
+        setTradeHistoryError(payload.partialError || "");
+      } catch (error) {
+        if (!disposed) setTradeHistoryError(error instanceof Error ? error.message : "Unable to load Binance trade history");
+      } finally {
+        if (!disposed) setTradeHistoryLoading(false);
+      }
+    }
+    void refreshTradeHistory();
+    const interval = window.setInterval(refreshTradeHistory, 60000);
+    return () => { disposed = true; window.clearInterval(interval); };
+  }, [tradeHistoryRefresh, tradeSymbols]);
 
   function addOrder(order: Order, isLive: boolean) {
     setOrders((current) => [order, ...current].slice(0, 3));
     setToast(`${isLive ? "Live" : "Simulated"} ${order.side.toLowerCase()} order for ${order.amount} ${coin.symbol}`);
+    if (isLive) window.setTimeout(() => { setAccountRefresh(Date.now()); setTradeHistoryRefresh(Date.now()); }, 1500);
     window.setTimeout(() => setToast(""), 3200);
   }
 
@@ -1061,13 +1110,13 @@ export default function Home() {
       </div>
 
       <section className="activity panel" id="orders">
-        <div className="activity-head"><div><p className="eyebrow">Session</p><h2>Recent activity</h2></div><button>View all orders ↗</button></div>
-        <div className="activity-table">
-          <div className="table-row table-head"><span>Pair</span><span>Side</span><span>Amount</span><span>Price</span><span>Status</span><span>Time</span></div>
-          {(orders.length ? orders : [
-            { id: 1, side: "Buy" as const, pair: "BTC/USDT", amount: 0.012, price: 66918.4, time: "14:24" },
-            { id: 2, side: "Sell" as const, pair: "ETH/USDT", amount: 0.48, price: 3421.2, time: "11:08" },
-          ]).map((order) => <div className="table-row" key={order.id}><span><b>{order.pair.split("/")[0]}</b> /USDT</span><span className={order.side === "Buy" ? "buy-text" : "sell-text"}>{order.side}</span><span>{order.amount}</span><span>${formatPrice(order.price)}</span><span><i className="filled-dot" />Filled</span><span>{order.time}</span></div>)}
+        <div className="activity-head"><div><p className="eyebrow">Binance spot account</p><h2>Trade history <span>{tradeHistory.length} fills</span></h2></div><button onClick={() => setTradeHistoryRefresh(Date.now())} disabled={tradeHistoryLoading}>{tradeHistoryLoading ? "Refreshing…" : "Refresh trades ↻"}</button></div>
+        {tradeHistoryError && <div className="activity-error">{tradeHistoryError}</div>}
+        <div className="activity-table activity-table-scroll">
+          <div className="table-row trade-history-row table-head"><span>Pair</span><span>Side</span><span>Amount</span><span>Price</span><span>Total</span><span>Fee</span><span>Date & time</span></div>
+          {tradeHistory.map((trade) => <div className="table-row trade-history-row" key={trade.id}><span><b>{trade.symbol}</b> /USDT</span><span className={trade.side === "Buy" ? "buy-text" : "sell-text"}>{trade.side}</span><span>{trade.amount.toLocaleString(undefined, { maximumFractionDigits: 8 })}</span><span>${formatPrice(trade.price)}</span><span>${trade.quoteAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span><span>{trade.commission.toLocaleString(undefined, { maximumFractionDigits: 8 })} {trade.commissionAsset}</span><span>{new Date(trade.time).toLocaleString([], { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" })}</span></div>)}
+          {!tradeHistoryLoading && !tradeHistory.length && orders.map((order) => <div className="table-row trade-history-row" key={`session-${order.id}`}><span><b>{order.pair.split("/")[0]}</b> /USDT</span><span className={order.side === "Buy" ? "buy-text" : "sell-text"}>{order.side}</span><span>{order.amount}</span><span>${formatPrice(order.price)}</span><span>${(order.amount * order.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span><span>—</span><span>{order.time} · This session</span></div>)}
+          {!tradeHistoryLoading && !tradeHistory.length && !orders.length && <div className="activity-empty"><span>↗</span><b>No matching Binance fills found</b><p>Trades from the configured coin universe and current wallet assets will appear here.</p></div>}
         </div>
       </section>
 

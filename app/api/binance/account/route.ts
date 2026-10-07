@@ -20,7 +20,7 @@ type CostBasis = {
 };
 
 const STABLECOINS = new Set(["USDT", "USDC", "FDUSD", "TUSD"]);
-const COST_BASIS_CACHE_MS = 5 * 60 * 1000;
+const COST_BASIS_CACHE_MS = 15 * 1000;
 const costBasisCache = new Map<string, { expiresAt: number; value: CostBasis }>();
 
 async function loadCostBasis(asset: string, currentAmount: number): Promise<CostBasis> {
@@ -56,6 +56,8 @@ async function loadCostBasis(asset: string, currentAmount: number): Promise<Cost
         heldQuantity -= removed;
       }
     }
+
+    result = { ...result, lastBuyPrice };
 
     if (heldQuantity > 0 && heldCost > 0) {
       const coverage = currentAmount > 0 ? Math.min(1, heldQuantity / currentAmount) : 0;
