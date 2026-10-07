@@ -36,6 +36,7 @@ export async function POST(request: Request) {
       price?: number;
       strategy?: string;
       candleTime?: number;
+      reason?: string;
     };
     const chatId = body.chatId?.trim() ?? "";
     if (!CHAT_ID_PATTERN.test(chatId)) return Response.json({ error: "Enter a valid Telegram chat ID or @channel username" }, { status: 400 });
@@ -47,6 +48,7 @@ export async function POST(request: Request) {
       const side = body.side?.toUpperCase() ?? "";
       const price = Number(body.price);
       const strategy = body.strategy?.trim() ?? "";
+      const reason = body.reason?.trim().slice(0, 160) ?? "";
       const candleTime = Number(body.candleTime);
       if (!/^[A-Z0-9]{2,12}$/.test(symbol) || !["BUY", "SELL"].includes(side) || !["1m", "5m", "15m", "1H", "4H", "1D"].includes(timeframe) || !Number.isFinite(price) || price <= 0 || !strategy) {
         return Response.json({ error: "Invalid signal payload" }, { status: 400 });
@@ -54,7 +56,7 @@ export async function POST(request: Request) {
       const icon = side === "BUY" ? "🟢" : "🔴";
       const formattedPrice = price < 1 ? price.toFixed(6) : price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       const confirmedAt = Number.isFinite(candleTime) ? new Date(candleTime).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "Just now";
-      text = `${icon} <b>${side} ${symbol}/USDT</b>\n\nPrice: <code>$${formattedPrice}</code>\nTimeframe: <b>${timeframe}</b>\nStrategy: ${escapeHtml(strategy)}\nConfirmed: ${confirmedAt}\n\n<i>Decision support only — not financial advice.</i>`;
+      text = `${icon} <b>${side} ${symbol}/USDT</b>\n\nPrice: <code>$${formattedPrice}</code>\nTimeframe: <b>${timeframe}</b>\nStrategy: ${escapeHtml(strategy)}${reason ? `\nTrigger: ${escapeHtml(reason)}` : ""}\nConfirmed: ${confirmedAt}\n\n<i>Decision support only — not financial advice.</i>`;
     }
 
     const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {

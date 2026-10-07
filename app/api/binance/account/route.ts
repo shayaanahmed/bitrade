@@ -15,6 +15,7 @@ type BinanceTrade = {
 type CostBasis = {
   averageBuyPrice: number | null;
   lastBuyPrice: number | null;
+  lastBuyTime: number | null;
   costBasisCoverage: number;
   costBasisSource: "trade-history" | "partial-history" | "unavailable";
 };
@@ -23,11 +24,11 @@ const STABLECOINS = new Set(["USDT", "USDC", "FDUSD", "TUSD"]);
 const COST_BASIS_CACHE_MS = 15 * 1000;
 const costBasisCache = new Map<string, { expiresAt: number; value: CostBasis }>();
 
-async function loadCostBasis(asset: string, currentAmount: number): Promise<CostBasis> {
+async function loadCostBasis(asset: string, currentAmount: number, forceRefresh = false): Promise<CostBasis> {
   const cached = costBasisCache.get(asset);
-  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  if (!forceRefresh && cached && cached.expiresAt > Date.now()) return cached.value;
 
-  let result: CostBasis = { averageBuyPrice: null, lastBuyPrice: null, costBasisCoverage: 0, costBasisSource: "unavailable" };
+  let result: CostBasis = { averageBuyPrice: null, lastBuyPrice: null, lastBuyTime: null, costBasisCoverage: 0, costBasisSource: "unavailable" };
   try {
     const response = await signedBinanceRequest("/api/v3/myTrades", { symbol: `${asset}USDT`, limit: 1000 });
     if (!response.ok) return result;
@@ -35,6 +36,7 @@ async function loadCostBasis(asset: string, currentAmount: number): Promise<Cost
     let heldQuantity = 0;
     let heldCost = 0;
     let lastBuyPrice: number | null = null;
+    let lastBuyTime: number | null = null;
 
     for (const trade of [...trades].sort((a, b) => a.time - b.time)) {
       const quantity = Number(trade.qty);
@@ -48,7 +50,10 @@ async function loadCostBasis(asset: string, currentAmount: number): Promise<Cost
         heldQuantity += acquired;
         heldCost += cost;
         const executionPrice = Number(trade.price);
-        if (Number.isFinite(executionPrice) && executionPrice > 0) lastBuyPrice = executionPrice;
+        if (Number.isFinite(executionPrice) && executionPrice > 0) {
+          lastBuyPrice = executionPrice;
+          lastBuyTime = trade.time;
+        }
       } else if (heldQuantity > 0) {
         const disposed = quantity + (trade.commissionAsset === asset ? commission : 0);
         const removed = Math.min(disposed, heldQuantity);
@@ -57,13 +62,14 @@ async function loadCostBasis(asset: string, currentAmount: number): Promise<Cost
       }
     }
 
-    result = { ...result, lastBuyPrice };
+    result = { ...result, lastBuyPrice, lastBuyTime };
 
     if (heldQuantity > 0 && heldCost > 0) {
       const coverage = currentAmount > 0 ? Math.min(1, heldQuantity / currentAmount) : 0;
       result = {
         averageBuyPrice: heldCost / heldQuantity,
         lastBuyPrice,
+        lastBuyTime,
         costBasisCoverage: coverage,
         costBasisSource: trades.length === 1000 || coverage < 0.95 ? "partial-history" : "trade-history",
       };
@@ -79,7 +85,12 @@ async function loadCostBasis(asset: string, currentAmount: number): Promise<Cost
 export async function GET(request: Request) {
   const searchParams = new URL(request.url).searchParams;
   const includeInsights = searchParams.get("includeInsights") === "true";
+  const forceRefresh = searchParams.get("refresh") === "true";
   const insightSymbol = (searchParams.get("symbol") || "").toUpperCase();
+  const insightSymbols = new Set([
+    insightSymbol,
+    ...(searchParams.get("symbols") || "").toUpperCase().split(","),
+  ].filter((symbol) => /^[A-Z0-9]{2,12}$/.test(symbol)));
   const config = getBinanceConfig();
   if (!config.apiKey || !config.apiSecret) {
     return Response.json({ configured: false, tradingEnabled: false, error: "Add BINANCE_API_KEY and BINANCE_API_SECRET to .env, then restart the container." }, { status: 503 });
@@ -112,13 +123,13 @@ export async function GET(request: Request) {
     }
 
     const insightCandidates = assets.filter((asset) => !STABLECOINS.has(asset.symbol) && asset.price > 0);
-    const prioritized = insightCandidates.find((asset) => asset.symbol === insightSymbol);
-    const insightTargets = (prioritized ? [prioritized, ...insightCandidates.filter((asset) => asset.symbol !== insightSymbol)] : insightCandidates).slice(0, 12);
-    const basisEntries = await Promise.all(insightTargets.map(async (asset) => [asset.symbol, await loadCostBasis(asset.symbol, asset.amount)] as const));
+    const prioritized = insightCandidates.filter((asset) => insightSymbols.has(asset.symbol));
+    const insightTargets = [...prioritized, ...insightCandidates.filter((asset) => !insightSymbols.has(asset.symbol))].slice(0, 12);
+    const basisEntries = await Promise.all(insightTargets.map(async (asset) => [asset.symbol, await loadCostBasis(asset.symbol, asset.amount, forceRefresh)] as const));
     const basisBySymbol = new Map(basisEntries);
     const enrichedAssets = assets.map((asset) => {
       if (STABLECOINS.has(asset.symbol)) {
-        return { ...asset, averageBuyPrice: 1, lastBuyPrice: 1, returnPercent: 0, unrealizedPnl: 0, costBasisCoverage: 1, costBasisSource: "stablecoin" };
+        return { ...asset, averageBuyPrice: 1, lastBuyPrice: 1, lastBuyTime: null, returnPercent: 0, unrealizedPnl: 0, costBasisCoverage: 1, costBasisSource: "stablecoin" };
       }
       const basis = basisBySymbol.get(asset.symbol);
       const averageBuyPrice = basis?.averageBuyPrice ?? null;
@@ -127,6 +138,7 @@ export async function GET(request: Request) {
         ...asset,
         averageBuyPrice,
         lastBuyPrice: basis?.lastBuyPrice ?? null,
+        lastBuyTime: basis?.lastBuyTime ?? null,
         returnPercent: averageBuyPrice ? (asset.price - averageBuyPrice) / averageBuyPrice * 100 : null,
         unrealizedPnl: averageBuyPrice ? (asset.price - averageBuyPrice) * coveredAmount : null,
         costBasisCoverage: basis?.costBasisCoverage ?? 0,

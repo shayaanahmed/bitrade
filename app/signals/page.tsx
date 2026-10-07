@@ -42,8 +42,14 @@ export default function SignalsPage() {
   }, []);
 
   function save() {
-    localStorage.setItem(SIGNAL_CONFIG_STORAGE_KEY, JSON.stringify(config));
-    localStorage.setItem(ACTIVE_STRATEGY_STORAGE_KEY, config.strategy);
+    const normalized = {
+      ...config,
+      minProfitPercent: Math.max(0.1, Math.min(100, Number(config.minProfitPercent) || DEFAULT_SIGNAL_CONFIG.minProfitPercent)),
+      trailingPullbackPercent: Math.max(0.1, Math.min(50, Number(config.trailingPullbackPercent) || DEFAULT_SIGNAL_CONFIG.trailingPullbackPercent)),
+    };
+    setConfig(normalized);
+    localStorage.setItem(SIGNAL_CONFIG_STORAGE_KEY, JSON.stringify(normalized));
+    localStorage.setItem(ACTIVE_STRATEGY_STORAGE_KEY, normalized.strategy);
     setSaved(true);
     window.setTimeout(() => setSaved(false), 2200);
   }
@@ -86,8 +92,12 @@ export default function SignalsPage() {
 
           <div className="signal-divider" />
           <div className="signal-section-head"><div><p className="eyebrow">Trigger</p><h2>Strategy & direction</h2></div></div>
-          <label className="signal-field full"><span>Signal strategy</span><select value={config.strategy} onChange={(event) => setConfig({ ...config, strategy: event.target.value as StrategyKey })}>{STRATEGY_CATALOG.map((strategy) => <option key={strategy.key} value={strategy.key}>{strategy.name} · {strategy.version}</option>)}</select><small>The scanner applies this strategy to every selected market and timeframe. Signals are confirmed only after a candle closes.</small></label>
-          <div className="signal-choice-group"><span>Directions</span><div>{(["BUY", "SELL"] as SignalSide[]).map((side) => <button key={side} className={`${config.sides.includes(side) ? "selected" : ""} ${side.toLowerCase()}`} onClick={() => setConfig({ ...config, sides: toggleValue(config.sides, side) })}><i />{side}</button>)}</div></div>
+          <label className="signal-field full"><span>Signal strategy</span><select value={config.strategy} onChange={(event) => { const strategy = event.target.value as StrategyKey; setConfig({ ...config, strategy, sides: strategy === "profit-guard" ? ["SELL"] : config.sides }); }}>{STRATEGY_CATALOG.map((strategy) => <option key={strategy.key} value={strategy.key}>{strategy.name} · {strategy.version}</option>)}</select><small>The scanner applies this strategy to every selected market and timeframe. Signals are confirmed only after a candle closes.</small></label>
+          {config.strategy === "profit-guard" && <div className="signal-form-grid profit-guard-settings">
+            <label className="signal-field"><span>Minimum profit to arm (%)</span><input type="number" min="0.1" max="100" step="0.1" value={config.minProfitPercent} onChange={(event) => setConfig({ ...config, minProfitPercent: Number(event.target.value) })} /><small>The position must first rise this far above its average buy price.</small></label>
+            <label className="signal-field"><span>Pullback from peak (%)</span><input type="number" min="0.1" max="50" step="0.1" value={config.trailingPullbackPercent} onChange={(event) => setConfig({ ...config, trailingPullbackPercent: Number(event.target.value) })} /><small>After arming, a confirmed close this far below the highest price signals SELL.</small></label>
+          </div>}
+          <div className="signal-choice-group"><span>Directions</span><div>{(["BUY", "SELL"] as SignalSide[]).map((side) => <button key={side} disabled={config.strategy === "profit-guard" && side === "BUY"} className={`${config.sides.includes(side) ? "selected" : ""} ${side.toLowerCase()}`} onClick={() => setConfig({ ...config, sides: toggleValue(config.sides, side) })}><i />{side}</button>)}</div></div>
 
           <div className="signal-divider" />
           <div className="signal-section-head"><div><p className="eyebrow">Scope</p><h2>Timeframes & markets</h2></div></div>
@@ -99,7 +109,7 @@ export default function SignalsPage() {
 
         <aside className="signal-side-column">
           <section className="panel signal-preview">
-            <p className="eyebrow">Message preview</p><div className="telegram-bubble"><span>TradePilot bot</span><b>🟢 BUY BTC/USDT</b><p>Price: <code>$83,022.29</code><br />Timeframe: <strong>{config.timeframes[0] || "—"}</strong><br />Strategy: {STRATEGY_CATALOG.find((item) => item.key === config.strategy)?.name}</p><small>Decision support only — not financial advice.</small></div>
+            <p className="eyebrow">Message preview</p><div className="telegram-bubble"><span>TradePilot bot</span><b>{config.strategy === "profit-guard" ? "🔴 SELL" : "🟢 BUY"} BTC/USDT</b><p>Price: <code>$83,022.29</code><br />Timeframe: <strong>{config.timeframes[0] || "—"}</strong><br />Strategy: {STRATEGY_CATALOG.find((item) => item.key === config.strategy)?.name}{config.strategy === "profit-guard" && <><br />Rule: +{config.minProfitPercent}% arm · {config.trailingPullbackPercent}% trail</>}</p><small>Decision support only — not financial advice.</small></div>
           </section>
           <section className="panel delivery-log">
             <div className="signal-section-head"><div><p className="eyebrow">Recent</p><h2>Delivery log</h2></div><span>{deliveries.length}</span></div>

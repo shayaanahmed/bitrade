@@ -1,5 +1,5 @@
 export type IndicatorKey = "ema9" | "ema21" | "sma20" | "bollinger" | "volume" | "rsi" | "vwap" | "macd" | "stochastic" | "atr";
-export type StrategyKey = "ema-cross" | "macd-trend" | "rsi-reversal" | "bollinger-breakout" | "vwap-pullback" | "triple-ma";
+export type StrategyKey = "ema-cross" | "macd-trend" | "rsi-reversal" | "bollinger-breakout" | "vwap-pullback" | "triple-ma" | "profit-guard";
 
 export type IndicatorDefinition = {
   key: IndicatorKey;
@@ -28,7 +28,7 @@ export const STRATEGY_STORAGE_KEY = "tradepilot-chart-strategies";
 export const ACTIVE_STRATEGY_STORAGE_KEY = "tradepilot-active-strategy";
 
 export const DEFAULT_INDICATORS: IndicatorKey[] = ["ema9", "ema21", "volume"];
-export const DEFAULT_STRATEGIES: StrategyKey[] = ["ema-cross"];
+export const DEFAULT_STRATEGIES: StrategyKey[] = ["ema-cross", "profit-guard"];
 
 export const INDICATOR_CATALOG: IndicatorDefinition[] = [
   { key: "ema9", name: "Exponential Moving Average 9", shortName: "EMA 9", description: "A fast moving average that reacts quickly to recent price changes.", category: "Trend", placement: "Price chart", settings: "Length 9 · Close", bestFor: "Short-term momentum" },
@@ -44,6 +44,7 @@ export const INDICATOR_CATALOG: IndicatorDefinition[] = [
 ];
 
 export const STRATEGY_CATALOG: StrategyDefinition[] = [
+  { key: "profit-guard", name: "Profit Guard", version: "v1.0", description: "Arms after a held asset reaches the minimum profit, then signals SELL when price pulls back from its peak or EMA 9 crosses below EMA 21.", category: "Trend", indicators: ["Position cost basis", "Peak trailing stop", "EMA 9", "EMA 21"], bestFor: "Protecting gains on an existing spot position", risk: "Low" },
   { key: "ema-cross", name: "Momentum Cross", version: "v1.2", description: "Signals when EMA 9 crosses EMA 21 to identify a change in short-term trend.", category: "Trend", indicators: ["EMA 9", "EMA 21"], bestFor: "Liquid markets with directional movement", risk: "Medium" },
   { key: "macd-trend", name: "MACD Trend Shift", version: "v1.0", description: "Uses MACD and its signal line to identify momentum moving with the broader trend.", category: "Momentum", indicators: ["MACD 12/26/9"], bestFor: "1H and 4H trend changes", risk: "Medium" },
   { key: "rsi-reversal", name: "RSI Reversal", version: "v1.0", description: "Looks for RSI leaving oversold or overbought territory before marking a reversal.", category: "Mean reversion", indicators: ["RSI 14"], bestFor: "Sideways and range-bound markets", risk: "High" },

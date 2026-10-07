@@ -7,7 +7,7 @@ Crypto trading dashboard with live Binance candlesticks, strategy signals, Teleg
 1. Copy `.env.example` to `.env`.
 2. Add your Binance API key and secret to `.env`.
 3. Run `docker compose up --build`.
-4. Open `http://localhost:3000`.
+4. Open `http://localhost:3030`.
 
 The chart uses public Binance data and works without credentials. Account balances need an API key with **Enable Reading** permission.
 
@@ -41,6 +41,8 @@ Secrets are consumed only by server routes and are never returned to the browser
 ## Telegram signals
 
 Create a bot with Telegram's `@BotFather`, add the bot to the target chat or channel, and set `TELEGRAM_BOT_TOKEN` in `.env`. Open `/signals` to choose the destination, strategy, timeframes, markets, and BUY/SELL directions, then send a test alert. Confirmed alerts are emitted while the trading dashboard is open and receiving live Binance candles.
+
+The **Profit Guard** strategy is alert-only. It uses the held asset's Binance cost basis, arms after the configured minimum profit (2% by default), and emits a SELL signal after either a confirmed 1.5% pullback from the post-entry peak or an EMA 9/21 bearish crossover. Its thresholds can be changed on `/signals`; it never submits an order.
 
 After adding or changing the token in a Docker setup, run `docker compose up -d --force-recreate` so Compose reloads the environment value. `docker compose restart` alone keeps the container's previous environment.
 

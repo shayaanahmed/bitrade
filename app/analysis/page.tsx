@@ -37,7 +37,10 @@ export default function AnalysisLibraryPage() {
 
   useEffect(() => {
     setAssignedIndicators(loadSelection(INDICATOR_STORAGE_KEY, DEFAULT_INDICATORS, INDICATOR_CATALOG.map((item) => item.key)));
-    setAssignedStrategies(loadSelection(STRATEGY_STORAGE_KEY, DEFAULT_STRATEGIES, STRATEGY_CATALOG.map((item) => item.key)));
+    const savedStrategies = loadSelection(STRATEGY_STORAGE_KEY, DEFAULT_STRATEGIES, STRATEGY_CATALOG.map((item) => item.key));
+    const strategies = savedStrategies.includes("profit-guard") ? savedStrategies : [...savedStrategies, "profit-guard" as const];
+    setAssignedStrategies(strategies);
+    localStorage.setItem(STRATEGY_STORAGE_KEY, JSON.stringify(strategies));
     const savedActive = localStorage.getItem(ACTIVE_STRATEGY_STORAGE_KEY) as StrategyKey | null;
     if (savedActive && STRATEGY_CATALOG.some((item) => item.key === savedActive)) setActiveStrategy(savedActive);
   }, []);

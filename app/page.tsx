@@ -13,7 +13,7 @@ import {
   type IndicatorKey,
   type StrategyKey,
 } from "@/lib/analysisCatalog";
-import { appendSignalDelivery, readSignalConfig, type SignalConfig, type SignalSide, type SignalTimeframe } from "@/lib/signalConfig";
+import { DEFAULT_SIGNAL_CONFIG, appendSignalDelivery, readSignalConfig, type SignalConfig, type SignalSide, type SignalTimeframe } from "@/lib/signalConfig";
 
 type Coin = {
   symbol: string;
@@ -45,6 +45,14 @@ type AccountAsset = {
   value: number;
   averageBuyPrice?: number | null;
   lastBuyPrice?: number | null;
+  lastBuyTime?: number | null;
+};
+
+type StrategyContext = {
+  entryPrice?: number | null;
+  entryTime?: number | null;
+  minProfitPercent?: number;
+  trailingPullbackPercent?: number;
 };
 
 type Order = {
@@ -286,7 +294,7 @@ function atr(candles: Candle[], period = 14) {
   return sma(trueRanges, period);
 }
 
-function strategySignals(strategy: StrategyKey, candles: Candle[]) {
+function strategySignals(strategy: StrategyKey, candles: Candle[], context: StrategyContext = {}) {
   const closes = candles.map((candle) => candle.close);
   const fast = ema(closes, 9);
   const slow = ema(closes, 21);
@@ -297,6 +305,56 @@ function strategySignals(strategy: StrategyKey, candles: Candle[]) {
   const fairValue = vwap(candles);
   let buy = -1;
   let sell = -1;
+
+  if (strategy === "profit-guard") {
+    const entryPrice = context.entryPrice && context.entryPrice > 0 ? context.entryPrice : null;
+    const minProfitPercent = Math.max(0.1, context.minProfitPercent ?? 2);
+    const trailingPullbackPercent = Math.max(0.1, Math.min(50, context.trailingPullbackPercent ?? 1.5));
+    const activationPrice = entryPrice ? entryPrice * (1 + minProfitPercent / 100) : null;
+    let peakPrice = entryPrice;
+    let trailingStop: number | null = null;
+    let activated = false;
+    let activationIndex = -1;
+    let reason = entryPrice ? `Waiting for +${minProfitPercent}% profit` : "No held position with a known cost basis";
+
+    if (entryPrice && activationPrice) {
+      for (let index = 0; index < candles.length; index += 1) {
+        const candle = candles[index];
+        if (context.entryTime && candle.openTime < context.entryTime) continue;
+        peakPrice = Math.max(peakPrice ?? entryPrice, candle.high);
+
+        if (!activated && peakPrice >= activationPrice) {
+          activated = true;
+          activationIndex = index;
+          trailingStop = peakPrice * (1 - trailingPullbackPercent / 100);
+          reason = "Armed and following the post-entry peak";
+          continue;
+        }
+        if (!activated) continue;
+
+        trailingStop = (peakPrice ?? entryPrice) * (1 - trailingPullbackPercent / 100);
+        const confirmedPullback = candle.close <= trailingStop;
+        const bearishCross = index > 0 && fast[index] < slow[index] && fast[index - 1] >= slow[index - 1];
+        if (index > activationIndex && (confirmedPullback || bearishCross)) {
+          sell = index;
+          reason = confirmedPullback ? `Closed ${trailingPullbackPercent}% below the peak` : "EMA 9 crossed below EMA 21";
+          break;
+        }
+      }
+    }
+
+    return {
+      buy,
+      sell,
+      signal: sell >= 0 ? "SELL" as const : "HOLD" as const,
+      activated,
+      entryPrice,
+      activationPrice,
+      peakPrice,
+      trailingStop,
+      reason,
+    };
+  }
 
   for (let index = 1; index < candles.length; index += 1) {
     if (strategy === "ema-cross") {
@@ -323,7 +381,7 @@ function strategySignals(strategy: StrategyKey, candles: Candle[]) {
       if (alignedDown && !priorDown) sell = index;
     }
   }
-  return { buy, sell, signal: buy >= sell ? "BUY" as const : "SELL" as const };
+  return { buy, sell, signal: buy >= sell ? "BUY" as const : "SELL" as const, activated: false, entryPrice: null, activationPrice: null, peakPrice: null, trailingStop: null, reason: "" };
 }
 
 function MiniSparkline({ positive = true }: { positive?: boolean }) {
@@ -335,7 +393,7 @@ function MiniSparkline({ positive = true }: { positive?: boolean }) {
   );
 }
 
-function MarketChart({ coin, candles, status, timeframe, activeStrategy, assignedStrategies, onStrategyChange, lastBuyPrice, positionAmount }: { coin: Coin; candles: Candle[]; status: ConnectionState; timeframe: string; activeStrategy: StrategyKey; assignedStrategies: StrategyKey[]; onStrategyChange: (strategy: StrategyKey) => void; lastBuyPrice: number | null; positionAmount: number }) {
+function MarketChart({ coin, candles, status, timeframe, activeStrategy, assignedStrategies, onStrategyChange, lastBuyPrice, positionAmount, positionEntryPrice, positionEntryTime, minProfitPercent, trailingPullbackPercent }: { coin: Coin; candles: Candle[]; status: ConnectionState; timeframe: string; activeStrategy: StrategyKey; assignedStrategies: StrategyKey[]; onStrategyChange: (strategy: StrategyKey) => void; lastBuyPrice: number | null; positionAmount: number; positionEntryPrice: number | null; positionEntryTime: number | null; minProfitPercent: number; trailingPullbackPercent: number }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [showStrategy, setShowStrategy] = useState(true);
   const [visibleCount, setVisibleCount] = useState(120);
@@ -406,7 +464,7 @@ function MarketChart({ coin, candles, status, timeframe, activeStrategy, assigne
   const tickIndices = Array.from({ length: 7 }, (_, index) => Math.min(visibleCandles.length - 1, Math.round(index * (visibleCandles.length - 1) / 6)));
   const current = hoverIndex === null ? visibleCandles[visibleCandles.length - 1] : visibleCandles[hoverIndex];
   const hoveredX = hoverIndex === null ? null : x(hoverIndex);
-  const activeSignals = strategySignals(activeStrategy, candles);
+  const activeSignals = strategySignals(activeStrategy, candles, { entryPrice: positionEntryPrice, entryTime: positionEntryTime, minProfitPercent, trailingPullbackPercent });
   const buySignal = activeSignals.buy;
   const sellSignal = activeSignals.sell;
   const localBuySignal = buySignal >= start && buySignal < end ? buySignal - start : -1;
@@ -925,10 +983,15 @@ export default function Home() {
   const baseCoin = COINS.find((item) => item.symbol === activeSymbol) ?? COINS[0];
   const { candles, status: marketStatus, livePrice } = useBinanceCandles(baseCoin.symbol, baseCoin.price, timeframe);
   const coin = useMemo(() => ({ ...baseCoin, price: livePrice }), [baseCoin, livePrice]);
-  const signal = useMemo(() => strategySignals(activeStrategy, candles).signal, [activeStrategy, candles]);
   const activeStrategyMeta = STRATEGY_CATALOG.find((strategy) => strategy.key === activeStrategy) ?? STRATEGY_CATALOG[0];
   const heldPosition = accountAssets.find((asset) => asset.symbol === coin.symbol && asset.amount > 0);
   const heldLastBuyPrice = heldPosition?.lastBuyPrice && heldPosition.lastBuyPrice > 0 ? heldPosition.lastBuyPrice : null;
+  const positionEntryPrice = heldPosition?.averageBuyPrice && heldPosition.averageBuyPrice > 0 ? heldPosition.averageBuyPrice : heldLastBuyPrice;
+  const positionEntryTime = heldPosition?.lastBuyTime ?? null;
+  const minProfitPercent = signalConfig?.minProfitPercent ?? DEFAULT_SIGNAL_CONFIG.minProfitPercent;
+  const trailingPullbackPercent = signalConfig?.trailingPullbackPercent ?? DEFAULT_SIGNAL_CONFIG.trailingPullbackPercent;
+  const activeSignal = useMemo(() => strategySignals(activeStrategy, candles, { entryPrice: positionEntryPrice, entryTime: positionEntryTime, minProfitPercent, trailingPullbackPercent }), [activeStrategy, candles, positionEntryPrice, positionEntryTime, minProfitPercent, trailingPullbackPercent]);
+  const signal = activeSignal.signal;
   const tradeSymbols = useMemo(() => Array.from(new Set([
     ...TRADE_HISTORY_SYMBOLS,
     ...accountAssets.filter((asset) => !["USDT", "USDC", "FDUSD", "TUSD"].includes(asset.symbol)).map((asset) => asset.symbol),
@@ -948,8 +1011,13 @@ export default function Home() {
     const preferred = localStorage.getItem("tradepilot-active-symbol");
     if (preferred && COINS.some((coin) => coin.symbol === preferred)) setActiveSymbol(preferred);
     try {
-      const assigned = JSON.parse(localStorage.getItem(STRATEGY_STORAGE_KEY) || "[]") as StrategyKey[];
+      const storedStrategies = localStorage.getItem(STRATEGY_STORAGE_KEY);
+      const assigned = storedStrategies === null ? DEFAULT_STRATEGIES : JSON.parse(storedStrategies) as StrategyKey[];
       const valid = assigned.filter((key) => STRATEGY_CATALOG.some((strategy) => strategy.key === key));
+      if (!valid.includes("profit-guard")) {
+        valid.push("profit-guard");
+        localStorage.setItem(STRATEGY_STORAGE_KEY, JSON.stringify(valid));
+      }
       if (valid.length) setAssignedStrategies(valid);
       const storedActive = localStorage.getItem(ACTIVE_STRATEGY_STORAGE_KEY) as StrategyKey | null;
       if (storedActive && STRATEGY_CATALOG.some((strategy) => strategy.key === storedActive)) setActiveStrategy(storedActive);
@@ -964,19 +1032,28 @@ export default function Home() {
     const controller = new AbortController();
     const strategyName = STRATEGY_CATALOG.find((item) => item.key === signalConfig.strategy)?.name ?? signalConfig.strategy;
 
-    async function inspectMarket(symbol: string, frame: SignalTimeframe) {
+    async function inspectMarket(symbol: string, frame: SignalTimeframe, position?: AccountAsset) {
       try {
         const response = await fetch(`/api/binance/klines?symbol=${symbol}USDT&interval=${BINANCE_INTERVAL[frame]}&limit=120`, { cache: "no-store", signal: controller.signal });
         if (!response.ok || disposed) return;
         const payload = await response.json() as { candles?: Array<Omit<Candle, "time">> };
         if (!payload.candles || payload.candles.length < 3 || disposed) return;
         const confirmedCandles = payload.candles.slice(0, -1).map((candle) => ({ ...candle, time: "" }));
-        const result = strategySignals(signalConfig.strategy, confirmedCandles);
+        const entryPrice = position?.averageBuyPrice && position.averageBuyPrice > 0 ? position.averageBuyPrice : position?.lastBuyPrice;
+        const result = strategySignals(signalConfig.strategy, confirmedCandles, {
+          entryPrice,
+          entryTime: position?.lastBuyTime,
+          minProfitPercent: signalConfig.minProfitPercent,
+          trailingPullbackPercent: signalConfig.trailingPullbackPercent,
+        });
+        const scope = `${symbol}:${frame}:${signalConfig.strategy}`;
         const index = Math.max(result.buy, result.sell);
-        if (index < 0) return;
+        if (index < 0) {
+          if (!seenSignals.has(scope)) seenSignals.set(scope, "NONE");
+          return;
+        }
         const side: SignalSide = result.buy >= result.sell ? "BUY" : "SELL";
         const candle = confirmedCandles[index];
-        const scope = `${symbol}:${frame}:${signalConfig.strategy}`;
         const eventId = `${side}:${candle.openTime}`;
         const previous = seenSignals.get(scope);
         seenSignals.set(scope, eventId);
@@ -986,7 +1063,7 @@ export default function Home() {
         const deliveryResponse = await fetch("/api/signals/telegram", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chatId: signalConfig.chatId, symbol, timeframe: frame, side, price: candle.close, strategy: strategyName, candleTime: candle.openTime }),
+          body: JSON.stringify({ chatId: signalConfig.chatId, symbol, timeframe: frame, side, price: candle.close, strategy: strategyName, candleTime: candle.openTime, reason: result.reason }),
           signal: controller.signal,
         });
         const deliveryPayload = await deliveryResponse.json() as { delivered?: boolean; error?: string };
@@ -1000,12 +1077,29 @@ export default function Home() {
       }
     }
 
-    function scanConfiguredMarkets() {
-      for (const symbol of signalConfig.markets) for (const frame of signalConfig.timeframes) void inspectMarket(symbol, frame);
+    let scanning = false;
+    async function scanConfiguredMarkets() {
+      if (scanning || disposed) return;
+      scanning = true;
+      try {
+        let positions = new Map<string, AccountAsset>();
+        if (signalConfig.strategy === "profit-guard") {
+          const requestedSymbols = encodeURIComponent(signalConfig.markets.join(","));
+          const response = await fetch(`/api/binance/account?includeInsights=true&symbols=${requestedSymbols}`, { cache: "no-store", signal: controller.signal });
+          if (!response.ok || disposed) return;
+          const payload = await response.json() as { assets?: AccountAsset[] };
+          positions = new Map((payload.assets ?? []).filter((asset) => asset.amount > 0).map((asset) => [asset.symbol, asset]));
+        }
+        await Promise.all(signalConfig.markets.flatMap((symbol) => signalConfig.timeframes.map((frame) => inspectMarket(symbol, frame, positions.get(symbol)))));
+      } catch (error) {
+        if (!disposed && !(error instanceof DOMException && error.name === "AbortError")) setToast("Signal scanner could not load held positions");
+      } finally {
+        scanning = false;
+      }
     }
 
-    scanConfiguredMarkets();
-    const scanInterval = window.setInterval(scanConfiguredMarkets, 30000);
+    void scanConfiguredMarkets();
+    const scanInterval = window.setInterval(() => void scanConfiguredMarkets(), 30000);
     return () => { disposed = true; controller.abort(); window.clearInterval(scanInterval); };
   }, [signalConfig]);
 
@@ -1018,13 +1112,15 @@ export default function Home() {
     let disposed = false;
     async function refreshAccount() {
       try {
-        const response = await fetch(`/api/binance/account?includeInsights=true&symbol=${activeSymbol}`, { cache: "no-store" });
+        const refreshParam = accountRefresh ? "&refresh=true" : "";
+        const response = await fetch(`/api/binance/account?includeInsights=true&symbol=${activeSymbol}${refreshParam}`, { cache: "no-store" });
         const payload = await response.json() as { tradingEnabled?: boolean; assets?: AccountAsset[] };
         if (!response.ok || !payload.assets) throw new Error("Account balance unavailable");
         if (disposed) return;
         setAccountAssets(payload.assets);
         setAccountConnected(true);
         setLiveTrading(Boolean(payload.tradingEnabled));
+        if (accountRefresh) setAccountRefresh(0);
       } catch {
         if (!disposed) {
           setAccountConnected(false);
@@ -1086,15 +1182,15 @@ export default function Home() {
             <a className="change-market" href="/markets">Change market</a>
             <div className="timeframes">{TIMEFRAMES.map((item) => <button key={item} className={timeframe === item ? "active" : ""} onClick={() => setTimeframe(item)}>{item}</button>)}</div>
           </section>
-          <MarketChart coin={coin} candles={candles} status={marketStatus} timeframe={timeframe} activeStrategy={activeStrategy} assignedStrategies={assignedStrategies} onStrategyChange={changeStrategy} lastBuyPrice={heldLastBuyPrice} positionAmount={heldPosition?.amount ?? 0} />
+          <MarketChart coin={coin} candles={candles} status={marketStatus} timeframe={timeframe} activeStrategy={activeStrategy} assignedStrategies={assignedStrategies} onStrategyChange={changeStrategy} lastBuyPrice={heldLastBuyPrice} positionAmount={heldPosition?.amount ?? 0} positionEntryPrice={positionEntryPrice} positionEntryTime={positionEntryTime} minProfitPercent={minProfitPercent} trailingPullbackPercent={trailingPullbackPercent} />
           <section className="strategy-card panel" id="strategy">
             <div className="strategy-accent"><span>✦</span></div>
             <div className="strategy-main">
               <div className="strategy-title"><div><p className="eyebrow">Active strategy</p><h2>{activeStrategyMeta.name} <span>{activeStrategyMeta.version}</span></h2></div><span className="running"><i />RUNNING</span></div>
               <p className="strategy-copy">{activeStrategyMeta.description} Signals are calculated from live candles and wait for a confirmed crossover or threshold event.</p>
-              <div className="strategy-metrics"><span><small>Current signal</small><b className={signal === "BUY" ? "buy-text" : "sell-text"}>{signal} · Live</b></span><span><small>Market feed</small><b>{marketStatus === "live" ? "Connected" : "Waiting"}</b></span><span><small>Risk / reward</small><b>1 : 2.0</b></span><span><small>Timeframe</small><b>{timeframe}</b></span></div>
+              <div className="strategy-metrics"><span><small>Current signal</small><b className={signal === "BUY" ? "buy-text" : signal === "SELL" ? "sell-text" : "hold-text"}>{signal} · Live</b></span><span><small>Market feed</small><b>{marketStatus === "live" ? "Connected" : "Waiting"}</b></span><span><small>{activeStrategy === "profit-guard" ? "Guard state" : "Risk / reward"}</small><b>{activeStrategy === "profit-guard" ? activeSignal.activated ? "Armed" : "Waiting" : "1 : 2.0"}</b></span><span><small>Timeframe</small><b>{timeframe}</b></span></div>
             </div>
-            <div className="strategy-levels"><div><span>Entry zone</span><b>${formatPrice(livePrice * .997)} – ${formatPrice(livePrice * 1.003)}</b></div><div><span>Stop loss</span><b className="down">${formatPrice(livePrice * (signal === "BUY" ? .98 : 1.02))}</b></div><div><span>Take profit</span><b className="up">${formatPrice(livePrice * (signal === "BUY" ? 1.04 : .96))}</b></div></div>
+            {activeStrategy === "profit-guard" ? <div className="strategy-levels"><div><span>Cost basis</span><b>{activeSignal.entryPrice ? `$${formatPrice(activeSignal.entryPrice)}` : "Not available"}</b></div><div><span>Arms at +{minProfitPercent}%</span><b className="up">{activeSignal.activationPrice ? `$${formatPrice(activeSignal.activationPrice)}` : "—"}</b></div><div><span>Trailing floor</span><b className={activeSignal.trailingStop ? "down" : ""}>{activeSignal.trailingStop ? `$${formatPrice(activeSignal.trailingStop)}` : `${trailingPullbackPercent}% below peak`}</b></div><div className="strategy-reason"><span>Status</span><b>{activeSignal.reason}</b></div></div> : <div className="strategy-levels"><div><span>Entry zone</span><b>${formatPrice(livePrice * .997)} – ${formatPrice(livePrice * 1.003)}</b></div><div><span>Stop loss</span><b className="down">${formatPrice(livePrice * (signal === "BUY" ? .98 : 1.02))}</b></div><div><span>Take profit</span><b className="up">${formatPrice(livePrice * (signal === "BUY" ? 1.04 : .96))}</b></div></div>}
           </section>
         </div>
         <div className="trade-column">
