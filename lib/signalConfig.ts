@@ -1,4 +1,4 @@
-import type { StrategyKey } from "./analysisCatalog";
+import { STRATEGY_CATALOG, type StrategyKey } from "./analysisCatalog";
 
 export const SIGNAL_CONFIG_STORAGE_KEY = "tradepilot-signal-config";
 export const SIGNAL_DELIVERY_LOG_KEY = "tradepilot-signal-delivery-log";
@@ -6,12 +6,16 @@ export const SIGNAL_DELIVERY_LOG_KEY = "tradepilot-signal-delivery-log";
 export const SIGNAL_TIMEFRAMES = ["1m", "5m", "15m", "1H", "4H", "1D"] as const;
 export type SignalTimeframe = typeof SIGNAL_TIMEFRAMES[number];
 export type SignalSide = "BUY" | "SELL";
+export type SignalStrategyMode = "individual" | "consensus";
 
 export type SignalConfig = {
   enabled: boolean;
   destination: "telegram";
   chatId: string;
   strategy: StrategyKey;
+  strategies: StrategyKey[];
+  strategyMode: SignalStrategyMode;
+  consensusMinimum: number;
   timeframes: SignalTimeframe[];
   markets: string[];
   sides: SignalSide[];
@@ -36,6 +40,9 @@ export const DEFAULT_SIGNAL_CONFIG: SignalConfig = {
   destination: "telegram",
   chatId: "",
   strategy: "ema-cross",
+  strategies: ["ema-cross"],
+  strategyMode: "individual",
+  consensusMinimum: 2,
   timeframes: ["1H", "4H"],
   markets: ["BTC", "ETH", "SOL"],
   sides: ["BUY", "SELL"],
@@ -48,15 +55,25 @@ export function readSignalConfig(): SignalConfig {
     const stored = localStorage.getItem(SIGNAL_CONFIG_STORAGE_KEY);
     if (!stored) return DEFAULT_SIGNAL_CONFIG;
     const parsed = JSON.parse(stored) as Partial<SignalConfig>;
-    const strategy = parsed.strategy ?? DEFAULT_SIGNAL_CONFIG.strategy;
+    const allowedStrategies = new Set(STRATEGY_CATALOG.map((item) => item.key));
+    const legacyStrategy = parsed.strategy && allowedStrategies.has(parsed.strategy) ? parsed.strategy : DEFAULT_SIGNAL_CONFIG.strategy;
+    const strategies = Array.isArray(parsed.strategies)
+      ? parsed.strategies.filter((item): item is StrategyKey => allowedStrategies.has(item as StrategyKey))
+      : [legacyStrategy];
+    const selectedStrategies = strategies.length ? [...new Set(strategies)] : [legacyStrategy];
+    const strategy = selectedStrategies[0];
+    const onlyProfitGuard = selectedStrategies.every((item) => item === "profit-guard");
     return {
       ...DEFAULT_SIGNAL_CONFIG,
       ...parsed,
       strategy,
+      strategies: selectedStrategies,
+      strategyMode: parsed.strategyMode === "consensus" ? "consensus" : "individual",
+      consensusMinimum: Math.max(1, Math.min(selectedStrategies.length, Number(parsed.consensusMinimum) || Math.min(2, selectedStrategies.length))),
       destination: "telegram",
       timeframes: SIGNAL_TIMEFRAMES.filter((item) => parsed.timeframes?.includes(item)),
       markets: Array.isArray(parsed.markets) ? parsed.markets.filter((item): item is string => typeof item === "string") : DEFAULT_SIGNAL_CONFIG.markets,
-      sides: strategy === "profit-guard" ? ["SELL"] : (["BUY", "SELL"] as SignalSide[]).filter((item) => parsed.sides?.includes(item)),
+      sides: onlyProfitGuard ? ["SELL"] : (["BUY", "SELL"] as SignalSide[]).filter((item) => parsed.sides?.includes(item)),
       minProfitPercent: Number.isFinite(parsed.minProfitPercent) ? Math.max(0.1, Math.min(100, Number(parsed.minProfitPercent))) : DEFAULT_SIGNAL_CONFIG.minProfitPercent,
       trailingPullbackPercent: Number.isFinite(parsed.trailingPullbackPercent) ? Math.max(0.1, Math.min(50, Number(parsed.trailingPullbackPercent))) : DEFAULT_SIGNAL_CONFIG.trailingPullbackPercent,
     };

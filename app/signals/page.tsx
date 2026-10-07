@@ -42,8 +42,14 @@ export default function SignalsPage() {
   }, []);
 
   function save() {
+    const strategies = config.strategies.length ? config.strategies : DEFAULT_SIGNAL_CONFIG.strategies;
+    const onlyProfitGuard = strategies.every((strategy) => strategy === "profit-guard");
     const normalized = {
       ...config,
+      strategy: strategies[0],
+      strategies,
+      sides: onlyProfitGuard ? ["SELL" as const] : config.sides,
+      consensusMinimum: Math.max(1, Math.min(strategies.length, Number(config.consensusMinimum) || Math.min(2, strategies.length))),
       minProfitPercent: Math.max(0.1, Math.min(100, Number(config.minProfitPercent) || DEFAULT_SIGNAL_CONFIG.minProfitPercent)),
       trailingPullbackPercent: Math.max(0.1, Math.min(50, Number(config.trailingPullbackPercent) || DEFAULT_SIGNAL_CONFIG.trailingPullbackPercent)),
     };
@@ -52,6 +58,19 @@ export default function SignalsPage() {
     localStorage.setItem(ACTIVE_STRATEGY_STORAGE_KEY, normalized.strategy);
     setSaved(true);
     window.setTimeout(() => setSaved(false), 2200);
+  }
+
+  function toggleStrategy(strategy: StrategyKey) {
+    const next = toggleValue(config.strategies, strategy);
+    if (!next.length) return;
+    const onlyProfitGuard = next.every((item) => item === "profit-guard");
+    setConfig({
+      ...config,
+      strategy: next[0],
+      strategies: next,
+      sides: onlyProfitGuard ? ["SELL"] : config.sides,
+      consensusMinimum: Math.max(1, Math.min(next.length, config.consensusMinimum)),
+    });
   }
 
   async function sendTest() {
@@ -71,13 +90,18 @@ export default function SignalsPage() {
     } finally { setTesting(false); }
   }
 
-  const ready = configured && Boolean(config.chatId) && config.timeframes.length > 0 && config.markets.length > 0 && config.sides.length > 0;
+  const onlyProfitGuard = config.strategies.every((strategy) => strategy === "profit-guard");
+  const ready = configured && Boolean(config.chatId) && config.strategies.length > 0 && config.timeframes.length > 0 && config.markets.length > 0 && config.sides.length > 0;
+  const previewSide = onlyProfitGuard ? "SELL" : "BUY";
+  const previewStrategy = config.strategyMode === "consensus"
+    ? `Consensus (${config.consensusMinimum}/${config.strategies.length})`
+    : config.strategies.map((key) => STRATEGY_CATALOG.find((item) => item.key === key)?.name ?? key).join(", ");
 
   return (
     <main className="app-shell subpage-shell signals-shell">
       <AppHeader active="signals" />
       <section className="subpage-hero signals-hero">
-        <div><p className="eyebrow">External automation</p><h1>Signal delivery</h1><p>Send a Telegram alert when the chart’s selected strategy confirms a new BUY or SELL event. Choose exactly which markets and timeframes can notify you.</p></div>
+        <div><p className="eyebrow">External automation</p><h1>Signal delivery</h1><p>Run several strategies together and send either each confirmed event or only a consensus BUY or SELL alert.</p></div>
         <div className={`signal-status-card panel ${ready && config.enabled ? "ready" : ""}`}><i /><div><b>{ready && config.enabled ? "Alerts armed" : "Setup required"}</b><span>{configured ? config.enabled ? "Watching for the next confirmed candle." : "Configuration saved with delivery paused." : "Telegram bot token is not configured on the server."}</span></div><span className="signal-status-label">{config.enabled ? "ON" : "OFF"}</span></div>
       </section>
 
@@ -91,13 +115,15 @@ export default function SignalsPage() {
           <div className="signal-test-row"><button onClick={() => void sendTest()} disabled={testing || !config.chatId}>{testing ? "Sending…" : "Send test alert"}</button><span className={testMessage.startsWith("Test") ? "success" : ""}>{testMessage || "Confirm the destination before enabling live alerts."}</span></div>
 
           <div className="signal-divider" />
-          <div className="signal-section-head"><div><p className="eyebrow">Trigger</p><h2>Strategy & direction</h2></div></div>
-          <label className="signal-field full"><span>Signal strategy</span><select value={config.strategy} onChange={(event) => { const strategy = event.target.value as StrategyKey; setConfig({ ...config, strategy, sides: strategy === "profit-guard" ? ["SELL"] : config.sides }); }}>{STRATEGY_CATALOG.map((strategy) => <option key={strategy.key} value={strategy.key}>{strategy.name} · {strategy.version}</option>)}</select><small>The scanner applies this strategy to every selected market and timeframe. Signals are confirmed only after a candle closes.</small></label>
-          {config.strategy === "profit-guard" && <div className="signal-form-grid profit-guard-settings">
+          <div className="signal-section-head"><div><p className="eyebrow">Trigger</p><h2>Strategies & direction</h2></div></div>
+          <div className="signal-choice-group"><span>Delivery logic</span><div>{(["individual", "consensus"] as const).map((mode) => <button key={mode} className={config.strategyMode === mode ? "selected" : ""} onClick={() => setConfig({ ...config, strategyMode: mode })}>{mode === "individual" ? "Each strategy" : "Consensus only"}</button>)}</div></div>
+          <div className="signal-choice-group strategy-choices"><span>Strategies</span><div>{STRATEGY_CATALOG.map((strategy) => <button key={strategy.key} className={config.strategies.includes(strategy.key) ? "selected" : ""} onClick={() => toggleStrategy(strategy.key)}><i style={{ background: config.strategies.includes(strategy.key) ? "currentColor" : undefined }} />{strategy.name}<small>{strategy.version}</small></button>)}</div></div>
+          {config.strategyMode === "consensus" && <div className="signal-form-grid consensus-settings"><label className="signal-field"><span>Minimum agreement</span><input type="number" min="1" max={config.strategies.length} step="1" value={config.consensusMinimum} onChange={(event) => setConfig({ ...config, consensusMinimum: Math.max(1, Math.min(config.strategies.length, Number(event.target.value) || 1)) })} /><small>At least this many selected strategies must agree on the same direction.</small></label></div>}
+          {config.strategies.includes("profit-guard") && <div className="signal-form-grid profit-guard-settings">
             <label className="signal-field"><span>Minimum profit to arm (%)</span><input type="number" min="0.1" max="100" step="0.1" value={config.minProfitPercent} onChange={(event) => setConfig({ ...config, minProfitPercent: Number(event.target.value) })} /><small>The position must first rise this far above its average buy price.</small></label>
             <label className="signal-field"><span>Pullback from peak (%)</span><input type="number" min="0.1" max="50" step="0.1" value={config.trailingPullbackPercent} onChange={(event) => setConfig({ ...config, trailingPullbackPercent: Number(event.target.value) })} /><small>After arming, a confirmed close this far below the highest price signals SELL.</small></label>
           </div>}
-          <div className="signal-choice-group"><span>Directions</span><div>{(["BUY", "SELL"] as SignalSide[]).map((side) => <button key={side} disabled={config.strategy === "profit-guard" && side === "BUY"} className={`${config.sides.includes(side) ? "selected" : ""} ${side.toLowerCase()}`} onClick={() => setConfig({ ...config, sides: toggleValue(config.sides, side) })}><i />{side}</button>)}</div></div>
+          <div className="signal-choice-group"><span>Directions</span><div>{(["BUY", "SELL"] as SignalSide[]).map((side) => <button key={side} disabled={onlyProfitGuard && side === "BUY"} className={`${config.sides.includes(side) ? "selected" : ""} ${side.toLowerCase()}`} onClick={() => setConfig({ ...config, sides: toggleValue(config.sides, side) })}><i />{side}</button>)}</div></div>
 
           <div className="signal-divider" />
           <div className="signal-section-head"><div><p className="eyebrow">Scope</p><h2>Timeframes & markets</h2></div></div>
@@ -109,7 +135,7 @@ export default function SignalsPage() {
 
         <aside className="signal-side-column">
           <section className="panel signal-preview">
-            <p className="eyebrow">Message preview</p><div className="telegram-bubble"><span>TradePilot bot</span><b>{config.strategy === "profit-guard" ? "🔴 SELL" : "🟢 BUY"} BTC/USDT</b><p>Price: <code>$83,022.29</code><br />Timeframe: <strong>{config.timeframes[0] || "—"}</strong><br />Strategy: {STRATEGY_CATALOG.find((item) => item.key === config.strategy)?.name}{config.strategy === "profit-guard" && <><br />Rule: +{config.minProfitPercent}% arm · {config.trailingPullbackPercent}% trail</>}</p><small>Decision support only — not financial advice.</small></div>
+            <p className="eyebrow">Message preview</p><div className="telegram-bubble"><span>TradePilot bot</span><b>{previewSide === "SELL" ? "🔴" : "🟢"} {previewSide} BTC/USDT</b><p>Price: <code>$83,022.29</code><br />Timeframe: <strong>{config.timeframes[0] || "—"}</strong><br />Mode: {config.strategyMode === "consensus" ? "Consensus only" : "Individual events"}<br />Strategy: {previewStrategy}{config.strategies.includes("profit-guard") && <><br />Profit Guard: +{config.minProfitPercent}% arm · {config.trailingPullbackPercent}% trail</>}</p><small>Decision support only — not financial advice.</small></div>
           </section>
           <section className="panel delivery-log">
             <div className="signal-section-head"><div><p className="eyebrow">Recent</p><h2>Delivery log</h2></div><span>{deliveries.length}</span></div>

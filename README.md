@@ -42,7 +42,9 @@ Secrets are consumed only by server routes and are never returned to the browser
 
 Create a bot with Telegram's `@BotFather`, add the bot to the target chat or channel, and set `TELEGRAM_BOT_TOKEN` in `.env`. Open `/signals` to choose the destination, strategy, timeframes, markets, and BUY/SELL directions, then send a test alert. Confirmed alerts are emitted while the trading dashboard is open and receiving live Binance candles.
 
-The **Profit Guard** strategy is alert-only. It uses the held asset's Binance cost basis, arms after the configured minimum profit (2% by default), and emits a SELL signal after either a confirmed 1.5% pullback from the post-entry peak or an EMA 9/21 bearish crossover. Its thresholds can be changed on `/signals`; it never submits an order.
+The chart can apply multiple assigned strategies at once. Every marker includes a short strategy label, and the strategy panel shows the combined BUY/SELL/HOLD consensus. Profit Guard adds a `PG ARMED` marker when protection activates and a `PG SELL` marker when its exit condition is confirmed.
+
+The **Profit Guard** strategy is alert-only. It uses the held asset's Binance cost basis, arms after the configured minimum profit (2% by default), and emits a SELL signal after either a confirmed 1.5% pullback from the post-entry peak or an EMA 9/21 bearish crossover. Its thresholds can be changed on `/signals`; it never submits an order. Telegram delivery can send each selected strategy independently or wait until a configurable number of strategies agree.
 
 After adding or changing the token in a Docker setup, run `docker compose up -d --force-recreate` so Compose reloads the environment value. `docker compose restart` alone keeps the container's previous environment.
 
