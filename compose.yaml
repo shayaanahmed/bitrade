@@ -5,14 +5,14 @@ services:
       args:
         NEXT_PUBLIC_BINANCE_WS_URL: ${NEXT_PUBLIC_BINANCE_WS_URL:-wss://stream.binance.com:9443/ws}
     ports:
-      - "3000:3000"
+      - "${TRADEPILOT_PORT:-3030}:3000"
     environment:
       BINANCE_API_KEY: ${BINANCE_API_KEY:-}
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
       BINANCE_BASE_URL: ${BINANCE_BASE_URL:-https://api.binance.com}
       BINANCE_ENABLE_TRADING: ${BINANCE_ENABLE_TRADING:-false}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-      SITE_URL: ${SITE_URL:-http://localhost:3000}
+      SITE_URL: ${SITE_URL:-http://localhost:3030}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/binance/klines?symbol=BTCUSDT&interval=1m&limit=20"]

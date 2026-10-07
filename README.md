@@ -33,6 +33,7 @@ npm run dev
 | `NEXT_PUBLIC_BINANCE_WS_URL` | Public WebSocket market-data endpoint |
 | `BINANCE_ENABLE_TRADING` | Explicit switch for real order submission |
 | `TELEGRAM_BOT_TOKEN` | Server-only bot token for external signal alerts |
+| `TRADEPILOT_PORT` | Host port published by Docker; defaults to `3030` |
 | `SITE_URL` | Absolute public URL used by metadata |
 
 Secrets are consumed only by server routes and are never returned to the browser.
@@ -42,3 +43,5 @@ Secrets are consumed only by server routes and are never returned to the browser
 Create a bot with Telegram's `@BotFather`, add the bot to the target chat or channel, and set `TELEGRAM_BOT_TOKEN` in `.env`. Open `/signals` to choose the destination, strategy, timeframes, markets, and BUY/SELL directions, then send a test alert. Confirmed alerts are emitted while the trading dashboard is open and receiving live Binance candles.
 
 After adding or changing the token in a Docker setup, run `docker compose up -d --force-recreate` so Compose reloads the environment value. `docker compose restart` alone keeps the container's previous environment.
+
+The Docker setup publishes TradePilot on host port `3030` by default. Set `TRADEPILOT_PORT` and update `SITE_URL` if you prefer another port. The application continues to listen on port `3000` inside Docker; only the host-facing port changes.
