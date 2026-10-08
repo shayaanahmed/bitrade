@@ -6,7 +6,6 @@ import { ACTIVE_STRATEGY_STORAGE_KEY, STRATEGY_CATALOG, type StrategyKey } from 
 import {
   DEFAULT_SIGNAL_CONFIG,
   SIGNAL_CONFIG_STORAGE_KEY,
-  SIGNAL_DELIVERY_LOG_KEY,
   SIGNAL_TIMEFRAMES,
   readSignalConfig,
   type SignalConfig,
@@ -16,6 +15,20 @@ import {
 } from "@/lib/signalConfig";
 
 const AVAILABLE_MARKETS = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX", "LINK"];
+
+type SignalServerState = {
+  configured?: boolean;
+  initialized?: boolean;
+  config?: SignalConfig;
+  deliveries?: SignalDelivery[];
+  scanner?: {
+    active?: boolean;
+    scanning?: boolean;
+    intervalSeconds?: number;
+    lastScanAt?: string | null;
+    lastError?: string | null;
+  };
+};
 
 function toggleValue<T extends string>(values: T[], value: T) {
   return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
@@ -28,20 +41,50 @@ export default function SignalsPage() {
   const [testing, setTesting] = useState(false);
   const [testMessage, setTestMessage] = useState("");
   const [deliveries, setDeliveries] = useState<SignalDelivery[]>([]);
+  const [scanner, setScanner] = useState<SignalServerState["scanner"]>(undefined);
 
   useEffect(() => {
-    const storedStateTimer = window.setTimeout(() => {
-      setConfig(readSignalConfig());
-      try { setDeliveries(JSON.parse(localStorage.getItem(SIGNAL_DELIVERY_LOG_KEY) || "[]")); } catch { setDeliveries([]); }
-    }, 0);
-    fetch("/api/signals/telegram", { cache: "no-store" })
-      .then((response) => response.json())
-      .then((payload: { configured?: boolean }) => setConfigured(Boolean(payload.configured)))
-      .catch(() => setConfigured(false));
-    return () => window.clearTimeout(storedStateTimer);
+    let disposed = false;
+    async function loadServerState(migrateLegacy = false) {
+      try {
+        const response = await fetch("/api/signals/config", { cache: "no-store" });
+        const payload = await response.json() as SignalServerState & { error?: string };
+        if (!response.ok) throw new Error(payload.error || "Background scanner unavailable");
+        if (migrateLegacy && !payload.initialized && localStorage.getItem(SIGNAL_CONFIG_STORAGE_KEY)) {
+          const migration = await fetch("/api/signals/config", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(readSignalConfig()),
+          });
+          const migrated = await migration.json() as SignalServerState & { error?: string };
+          if (!migration.ok) throw new Error(migrated.error || "Unable to migrate signal configuration");
+          if (!disposed) {
+            setConfig(migrated.config ?? DEFAULT_SIGNAL_CONFIG);
+            setConfigured(Boolean(migrated.configured));
+            setDeliveries(migrated.deliveries ?? []);
+            setScanner(migrated.scanner);
+          }
+          return;
+        }
+        if (!disposed) {
+          setConfig(payload.config ?? DEFAULT_SIGNAL_CONFIG);
+          setConfigured(Boolean(payload.configured));
+          setDeliveries(payload.deliveries ?? []);
+          setScanner(payload.scanner);
+        }
+      } catch (error) {
+        if (!disposed) {
+          setConfigured(false);
+          setTestMessage(error instanceof Error ? error.message : "Background scanner unavailable");
+        }
+      }
+    }
+    void loadServerState(true);
+    const refresh = window.setInterval(() => void loadServerState(), 10_000);
+    return () => { disposed = true; window.clearInterval(refresh); };
   }, []);
 
-  function save() {
+  async function save() {
     const strategies = config.strategies.length ? config.strategies : DEFAULT_SIGNAL_CONFIG.strategies;
     const onlyProfitGuard = strategies.every((strategy) => strategy === "profit-guard");
     const normalized = {
@@ -53,11 +96,26 @@ export default function SignalsPage() {
       minProfitPercent: Math.max(0.1, Math.min(100, Number(config.minProfitPercent) || DEFAULT_SIGNAL_CONFIG.minProfitPercent)),
       trailingPullbackPercent: Math.max(0.1, Math.min(50, Number(config.trailingPullbackPercent) || DEFAULT_SIGNAL_CONFIG.trailingPullbackPercent)),
     };
-    setConfig(normalized);
-    localStorage.setItem(SIGNAL_CONFIG_STORAGE_KEY, JSON.stringify(normalized));
-    localStorage.setItem(ACTIVE_STRATEGY_STORAGE_KEY, normalized.strategy);
-    setSaved(true);
-    window.setTimeout(() => setSaved(false), 2200);
+    try {
+      const response = await fetch("/api/signals/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(normalized),
+      });
+      const payload = await response.json() as SignalServerState & { error?: string };
+      if (!response.ok || !payload.config) throw new Error(payload.error || "Unable to save signal configuration");
+      setConfig(payload.config);
+      setConfigured(Boolean(payload.configured));
+      setDeliveries(payload.deliveries ?? []);
+      setScanner(payload.scanner);
+      localStorage.setItem(SIGNAL_CONFIG_STORAGE_KEY, JSON.stringify(payload.config));
+      localStorage.setItem(ACTIVE_STRATEGY_STORAGE_KEY, payload.config.strategy);
+      setTestMessage("");
+      setSaved(true);
+      window.setTimeout(() => setSaved(false), 2200);
+    } catch (error) {
+      setTestMessage(error instanceof Error ? error.message : "Unable to save signal configuration");
+    }
   }
 
   function toggleStrategy(strategy: StrategyKey) {
@@ -92,6 +150,7 @@ export default function SignalsPage() {
 
   const onlyProfitGuard = config.strategies.every((strategy) => strategy === "profit-guard");
   const ready = configured && Boolean(config.chatId) && config.strategies.length > 0 && config.timeframes.length > 0 && config.markets.length > 0 && config.sides.length > 0;
+  const armed = Boolean(ready && config.enabled && scanner?.active);
   const previewSide = onlyProfitGuard ? "SELL" : "BUY";
   const previewStrategy = config.strategyMode === "consensus"
     ? `Consensus (${config.consensusMinimum}/${config.strategies.length})`
@@ -102,7 +161,7 @@ export default function SignalsPage() {
       <AppHeader active="signals" />
       <section className="subpage-hero signals-hero">
         <div><p className="eyebrow">External automation</p><h1>Signal delivery</h1><p>Run several strategies together and send either each confirmed event or only a consensus BUY or SELL alert.</p></div>
-        <div className={`signal-status-card panel ${ready && config.enabled ? "ready" : ""}`}><i /><div><b>{ready && config.enabled ? "Alerts armed" : "Setup required"}</b><span>{configured ? config.enabled ? "Watching for the next confirmed candle." : "Configuration saved with delivery paused." : "Telegram bot token is not configured on the server."}</span></div><span className="signal-status-label">{config.enabled ? "ON" : "OFF"}</span></div>
+        <div className={`signal-status-card panel ${armed ? "ready" : ""}`}><i /><div><b>{armed ? "Alerts armed" : "Setup required"}</b><span>{scanner?.lastError ? scanner.lastError : configured ? config.enabled ? scanner?.lastScanAt ? `Server scanner active · last checked ${new Date(scanner.lastScanAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Server scanner is starting." : "Configuration saved with delivery paused." : "Telegram bot token or background scanner is not configured."}</span></div><span className="signal-status-label">{armed ? "ON" : "OFF"}</span></div>
       </section>
 
       <div className="signals-layout">
@@ -130,7 +189,7 @@ export default function SignalsPage() {
           <div className="signal-choice-group"><span>Timeframes</span><div>{SIGNAL_TIMEFRAMES.map((frame) => <button key={frame} className={config.timeframes.includes(frame) ? "selected" : ""} onClick={() => setConfig({ ...config, timeframes: toggleValue(config.timeframes, frame as SignalTimeframe) })}>{frame}</button>)}</div></div>
           <div className="signal-choice-group market-choices"><span>Markets</span><div>{AVAILABLE_MARKETS.map((market) => <button key={market} className={config.markets.includes(market) ? "selected" : ""} onClick={() => setConfig({ ...config, markets: toggleValue(config.markets, market) })}>{market}<small>/USDT</small></button>)}</div></div>
 
-          <div className="signal-save-bar"><label><input type="checkbox" checked={config.enabled} onChange={(event) => setConfig({ ...config, enabled: event.target.checked })} /><span><b>Enable signal delivery</b><small>The dashboard scans all selected market/timeframe combinations every 30 seconds while it is open.</small></span></label><button className="save-signal" onClick={save}>{saved ? "✓ Saved" : "Save configuration"}</button></div>
+          <div className="signal-save-bar"><label><input type="checkbox" checked={config.enabled} onChange={(event) => setConfig({ ...config, enabled: event.target.checked })} /><span><b>Enable signal delivery</b><small>The deployment scans all selected markets every {scanner?.intervalSeconds ?? 30} seconds, even when no browser is open.</small></span></label><button className="save-signal" onClick={() => void save()}>{saved ? "✓ Saved" : "Save configuration"}</button></div>
         </section>
 
         <aside className="signal-side-column">
@@ -141,10 +200,10 @@ export default function SignalsPage() {
             <div className="signal-section-head"><div><p className="eyebrow">Recent</p><h2>Delivery log</h2></div><span>{deliveries.length}</span></div>
             {deliveries.length ? deliveries.slice(0, 6).map((item) => <div className="delivery-row" key={item.id}><i className={item.status} /><div><b>{item.side} {item.symbol}/USDT</b><span>{item.timeframe} · {item.strategy}</span></div><time>{new Date(item.sentAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></div>) : <div className="empty-deliveries"><span>↗</span><b>No alerts sent yet</b><p>The first new confirmed signal will appear here after delivery.</p></div>}
           </section>
-          <section className="panel signal-server-note"><span>i</span><p><b>Server setup</b>Add <code>TELEGRAM_BOT_TOKEN</code> to <code>.env</code> and restart the app. The token is never returned to the browser.</p></section>
+          <section className="panel signal-server-note"><span>i</span><p><b>Server scanner</b>Configuration, deduplication, and delivery history are persisted by the deployment. Browser tabs can be closed after saving.</p></section>
         </aside>
       </div>
-      <footer><p>Signal alerts are decision-support notifications, not trade instructions.</p><span>External signals <i /> {ready && config.enabled ? "Armed" : "Paused"}</span></footer>
+      <footer><p>Signal alerts are decision-support notifications, not trade instructions.</p><span>External signals <i /> {armed ? "Armed" : "Paused"}</span></footer>
     </main>
   );
 }

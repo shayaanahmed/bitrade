@@ -12,11 +12,40 @@ services:
       BINANCE_BASE_URL: ${BINANCE_BASE_URL:-https://api.binance.com}
       BINANCE_ENABLE_TRADING: ${BINANCE_ENABLE_TRADING:-false}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      SIGNAL_SERVICE_URL: http://signal-scanner:3001
       SITE_URL: ${SITE_URL:-http://localhost:3030}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/binance/klines?symbol=BTCUSDT&interval=1m&limit=20"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/binance/klines?symbol=BTCUSDT&interval=1m&limit=20"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
+  signal-scanner:
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_BINANCE_WS_URL: ${NEXT_PUBLIC_BINANCE_WS_URL:-wss://stream.binance.com:9443/ws}
+    command: ["npm", "run", "start:scanner"]
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TRADEPILOT_INTERNAL_URL: http://tradepilot:3000
+      SIGNAL_SERVICE_PORT: "3001"
+      SIGNAL_STATE_FILE: /data/signals.json
+      SIGNAL_SCAN_INTERVAL_MS: ${SIGNAL_SCAN_INTERVAL_MS:-30000}
+      SIGNAL_RETRY_INTERVAL_MS: ${SIGNAL_RETRY_INTERVAL_MS:-300000}
+    volumes:
+      - signal-state:/data
+    restart: unless-stopped
+    depends_on:
+      tradepilot:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  signal-state:

@@ -33,6 +33,8 @@ npm run dev
 | `NEXT_PUBLIC_BINANCE_WS_URL` | Public WebSocket market-data endpoint |
 | `BINANCE_ENABLE_TRADING` | Explicit switch for real order submission |
 | `TELEGRAM_BOT_TOKEN` | Server-only bot token for external signal alerts |
+| `SIGNAL_SCAN_INTERVAL_MS` | Background signal scan interval; defaults to 30 seconds |
+| `SIGNAL_RETRY_INTERVAL_MS` | Retry delay after a failed Telegram delivery; defaults to 5 minutes |
 | `TRADEPILOT_PORT` | Host port published by Docker; defaults to `3030` |
 | `SITE_URL` | Absolute public URL used by metadata |
 
@@ -40,12 +42,14 @@ Secrets are consumed only by server routes and are never returned to the browser
 
 ## Telegram signals
 
-Create a bot with Telegram's `@BotFather`, add the bot to the target chat or channel, and set `TELEGRAM_BOT_TOKEN` in `.env`. Open `/signals` to choose the destination, strategy, timeframes, markets, and BUY/SELL directions, then send a test alert. Confirmed alerts are emitted while the trading dashboard is open and receiving live Binance candles.
+Create a bot with Telegram's `@BotFather`, add the bot to the target chat or channel, and set `TELEGRAM_BOT_TOKEN` in `.env`. Open `/signals` to choose the destination, strategy, timeframes, markets, and BUY/SELL directions, then send a test alert. The Docker deployment runs a dedicated background scanner, so confirmed alerts continue when every browser is closed.
+
+Signal configuration, delivery history, and deduplication state are stored in the `signal-state` Docker volume. The first visit to `/signals` after upgrading automatically migrates a configuration previously saved in that browser. Save the configuration once to confirm that the server scanner reports **Alerts armed**.
 
 The chart can apply multiple assigned strategies at once. Every marker includes a short strategy label, and the strategy panel shows the combined BUY/SELL/HOLD consensus. Profit Guard adds a `PG ARMED` marker when protection activates and a `PG SELL` marker when its exit condition is confirmed.
 
 The **Profit Guard** strategy is alert-only. It uses the held asset's Binance cost basis, arms after the configured minimum profit (2% by default), and emits a SELL signal after either a confirmed 1.5% pullback from the post-entry peak or an EMA 9/21 bearish crossover. Its thresholds can be changed on `/signals`; it never submits an order. Telegram delivery can send each selected strategy independently or wait until a configurable number of strategies agree.
 
-After adding or changing the token in a Docker setup, run `docker compose up -d --force-recreate` so Compose reloads the environment value. `docker compose restart` alone keeps the container's previous environment.
+After upgrading this version or changing the token, run `docker compose up -d --build --force-recreate` so Compose creates both the web service and the background scanner with the current environment. `docker compose restart` alone keeps the containers' previous environment.
 
 The Docker setup publishes TradePilot on host port `3030` by default. Set `TRADEPILOT_PORT` and update `SITE_URL` if you prefer another port. The application continues to listen on port `3000` inside Docker; only the host-facing port changes.

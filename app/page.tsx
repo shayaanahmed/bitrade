@@ -13,7 +13,8 @@ import {
   type IndicatorKey,
   type StrategyKey,
 } from "@/lib/analysisCatalog";
-import { DEFAULT_SIGNAL_CONFIG, appendSignalDelivery, readSignalConfig, type SignalConfig, type SignalSide, type SignalTimeframe } from "@/lib/signalConfig";
+import type { SignalCandle, StrategyContext } from "@/lib/signalEngine";
+import { DEFAULT_SIGNAL_CONFIG, type SignalConfig } from "@/lib/signalConfig";
 
 type Coin = {
   symbol: string;
@@ -25,13 +26,7 @@ type Coin = {
   color: string;
 };
 
-type Candle = {
-  openTime: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
+type Candle = SignalCandle & {
   time: string;
 };
 
@@ -46,13 +41,6 @@ type AccountAsset = {
   averageBuyPrice?: number | null;
   lastBuyPrice?: number | null;
   lastBuyTime?: number | null;
-};
-
-type StrategyContext = {
-  entryPrice?: number | null;
-  entryTime?: number | null;
-  minProfitPercent?: number;
-  trailingPullbackPercent?: number;
 };
 
 type Order = {
@@ -1046,9 +1034,10 @@ export default function Home() {
   ])).slice(0, 20).join(","), [accountAssets]);
 
   useEffect(() => {
-    const signalConfigTimer = window.setTimeout(() => setSignalConfig(readSignalConfig()), 0);
-    const refreshSignalConfig = () => setSignalConfig(readSignalConfig());
-    window.addEventListener("storage", refreshSignalConfig);
+    fetch("/api/signals/config", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((payload: { config?: SignalConfig }) => payload.config && setSignalConfig(payload.config))
+      .catch(() => setSignalConfig(DEFAULT_SIGNAL_CONFIG));
     const saved = localStorage.getItem("tradepilot-universe");
     if (saved) {
       try {
@@ -1071,114 +1060,8 @@ export default function Home() {
       if (storedActive && valid.includes(storedActive)) setActiveStrategy(storedActive);
       else if (valid.length) setActiveStrategy(valid[0]);
     } catch { /* use default strategy */ }
-    return () => { window.clearTimeout(signalConfigTimer); window.removeEventListener("storage", refreshSignalConfig); };
   }, []);
 
-  useEffect(() => {
-    if (!signalConfig?.enabled || !signalConfig.chatId || !signalConfig.strategies.length || !signalConfig.markets.length || !signalConfig.timeframes.length || !signalConfig.sides.length) return;
-    let disposed = false;
-    const seenSignals = new Map<string, string>();
-    const controller = new AbortController();
-
-    async function deliverSignal(scope: string, eventId: string, symbol: string, frame: SignalTimeframe, side: SignalSide, candle: Candle, strategyName: string, reason: string) {
-      const previous = seenSignals.get(scope);
-      seenSignals.set(scope, eventId);
-      if (previous === undefined || previous === eventId || !signalConfig?.sides.includes(side) || disposed) return;
-
-      const deliveryId = `${scope}:${eventId}:${Date.now()}`;
-      const deliveryResponse = await fetch("/api/signals/telegram", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chatId: signalConfig.chatId, symbol, timeframe: frame, side, price: candle.close, strategy: strategyName, candleTime: candle.openTime, reason }),
-        signal: controller.signal,
-      });
-      const deliveryPayload = await deliveryResponse.json() as { delivered?: boolean; error?: string };
-      if (disposed) return;
-      const deliveryStatus = deliveryResponse.ok && deliveryPayload.delivered ? "sent" as const : "failed" as const;
-      appendSignalDelivery({ id: deliveryId, sentAt: new Date().toISOString(), symbol, timeframe: frame, side, price: candle.close, strategy: strategyName, status: deliveryStatus, detail: deliveryPayload.error });
-      setToast(deliveryStatus === "sent" ? `${side} ${symbol} signal delivered to Telegram` : deliveryPayload.error || "Telegram signal delivery failed");
-      window.setTimeout(() => setToast(""), 3200);
-    }
-
-    async function inspectMarket(symbol: string, frame: SignalTimeframe, position?: AccountAsset) {
-      try {
-        const response = await fetch(`/api/binance/klines?symbol=${symbol}USDT&interval=${BINANCE_INTERVAL[frame]}&limit=120`, { cache: "no-store", signal: controller.signal });
-        if (!response.ok || disposed) return;
-        const payload = await response.json() as { candles?: Array<Omit<Candle, "time">> };
-        if (!payload.candles || payload.candles.length < 3 || disposed) return;
-        const confirmedCandles = payload.candles.slice(0, -1).map((candle) => ({ ...candle, time: "" }));
-        const entryPrice = position?.averageBuyPrice && position.averageBuyPrice > 0 ? position.averageBuyPrice : position?.lastBuyPrice;
-        const context = {
-          entryPrice,
-          entryTime: position?.lastBuyTime,
-          minProfitPercent: signalConfig.minProfitPercent,
-          trailingPullbackPercent: signalConfig.trailingPullbackPercent,
-        };
-        const evaluations = signalConfig.strategies.map((strategy) => ({ strategy, result: strategySignals(strategy, confirmedCandles, context) }));
-
-        if (signalConfig.strategyMode === "consensus") {
-          const consensus = strategyConsensus(evaluations, signalConfig.consensusMinimum);
-          const scope = `${symbol}:${frame}:consensus:${signalConfig.strategies.join(",")}`;
-          if (consensus.signal === "HOLD" || consensus.eventIndex < 0) {
-            seenSignals.set(scope, "NONE");
-            return;
-          }
-          const side: SignalSide = consensus.signal;
-          const candle = confirmedCandles[consensus.eventIndex];
-          const voterSignature = consensus.voters.map((item) => {
-            const index = side === "BUY" ? item.result.buy : item.result.sell;
-            return `${item.strategy}:${confirmedCandles[index]?.openTime ?? 0}`;
-          }).sort().join("|");
-          const eventId = `${side}:${voterSignature}`;
-          const voterLabels = consensus.voters.map((item) => STRATEGY_VISUALS[item.strategy].short).join(" + ");
-          const strategyName = `Consensus ${consensus.voters.length}/${evaluations.length}: ${voterLabels}`;
-          await deliverSignal(scope, eventId, symbol, frame, side, candle, strategyName, `${consensus.voters.length} of ${evaluations.length} selected strategies agree`);
-          return;
-        }
-
-        await Promise.all(evaluations.map(async ({ strategy, result }) => {
-          const scope = `${symbol}:${frame}:${strategy}`;
-          const index = Math.max(result.buy, result.sell);
-          if (index < 0 || result.signal === "HOLD") {
-            if (!seenSignals.has(scope)) seenSignals.set(scope, "NONE");
-            return;
-          }
-          const side: SignalSide = result.signal;
-          const candle = confirmedCandles[index];
-          const eventId = `${side}:${candle.openTime}`;
-          const strategyName = STRATEGY_CATALOG.find((item) => item.key === strategy)?.name ?? strategy;
-          await deliverSignal(scope, eventId, symbol, frame, side, candle, strategyName, result.reason);
-        }));
-      } catch (error) {
-        if (!disposed && !(error instanceof DOMException && error.name === "AbortError")) setToast("Signal scanner could not refresh market data");
-      }
-    }
-
-    let scanning = false;
-    async function scanConfiguredMarkets() {
-      if (scanning || disposed) return;
-      scanning = true;
-      try {
-        let positions = new Map<string, AccountAsset>();
-        if (signalConfig.strategies.includes("profit-guard")) {
-          const requestedSymbols = encodeURIComponent(signalConfig.markets.join(","));
-          const response = await fetch(`/api/binance/account?includeInsights=true&symbols=${requestedSymbols}`, { cache: "no-store", signal: controller.signal });
-          if (!response.ok || disposed) return;
-          const payload = await response.json() as { assets?: AccountAsset[] };
-          positions = new Map((payload.assets ?? []).filter((asset) => asset.amount > 0).map((asset) => [asset.symbol, asset]));
-        }
-        await Promise.all(signalConfig.markets.flatMap((symbol) => signalConfig.timeframes.map((frame) => inspectMarket(symbol, frame, positions.get(symbol)))));
-      } catch (error) {
-        if (!disposed && !(error instanceof DOMException && error.name === "AbortError")) setToast("Signal scanner could not load held positions");
-      } finally {
-        scanning = false;
-      }
-    }
-
-    void scanConfiguredMarkets();
-    const scanInterval = window.setInterval(() => void scanConfiguredMarkets(), 30000);
-    return () => { disposed = true; controller.abort(); window.clearInterval(scanInterval); };
-  }, [signalConfig]);
 
   function changeStrategy(strategy: StrategyKey) {
     setActiveStrategy(strategy);
