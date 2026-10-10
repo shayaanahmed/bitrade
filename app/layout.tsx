@@ -7,20 +7,20 @@ const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"]
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.SITE_URL ?? "http://localhost:3000"),
-  title: "TradePilot — Crypto trading assistant",
-  description: "Chart, scan and simulate crypto trades with a focused strategy workspace.",
+  title: "TradePilot — Trading & research platform",
+  description: "Chart and scan markets, run reproducible backtests, validate ensembles, and paper trade safely.",
   icons: { icon: "/favicon.svg", shortcut: "/favicon.svg" },
   openGraph: {
-    title: "TradePilot — Crypto trading assistant",
-    description: "Chart. Scan. Trade with clarity.",
+    title: "TradePilot Research",
+    description: "Backtest. Validate. Paper trade.",
     type: "website",
-    images: [{ url: "/og.png", width: 1200, height: 630, alt: "TradePilot crypto trading workspace" }],
+    images: [{ url: "/og-research.png", width: 1730, height: 909, alt: "TradePilot Research workflow" }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "TradePilot — Crypto trading assistant",
-    description: "Chart. Scan. Trade with clarity.",
-    images: ["/og.png"],
+    title: "TradePilot Research",
+    description: "Backtest. Validate. Paper trade.",
+    images: ["/og-research.png"],
   },
 };
 

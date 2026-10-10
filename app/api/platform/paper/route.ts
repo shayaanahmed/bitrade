@@ -1,0 +1,28 @@
+import type { Candle } from "@/lib/platform/contracts";
+import { importModelBundle, type ModelBundle } from "@/lib/platform/ensemble";
+import { apiError, protectMutation, readJson } from "@/lib/platform/http";
+import { initialPaperState, processCompletedCandle, transitionPaperState, type PaperConfiguration, type PaperState } from "@/lib/platform/paper";
+import { appendPaperEvent, getPaperSession, listPaperSessions, savePaperSession } from "@/lib/platform/store";
+import { stableHash } from "@/lib/platform/math";
+import { resolveData, TIMEFRAME_MILLISECONDS } from "@/lib/platform/data";
+import { requireStrategy } from "@/lib/platform/strategies";
+import type { Timeframe } from "@/lib/platform/contracts";
+
+type CreateBody = { action: "create"; name?: string; bundle: ModelBundle; configuration: Omit<PaperConfiguration, "sessionId" | "modelId" | "modelVersion"> };
+type ControlBody = { action: "start" | "pause" | "resume" | "emergency-stop"; sessionId: string };
+type CandleBody = { action: "candle"; sessionId: string; candle: Candle; features: number[] };
+type ScanBody = { action: "scan"; sessionId: string };
+
+export async function GET() { try { const records = await listPaperSessions(); return Response.json({ sessions: records.map((record) => ({ id: record.id, modelId: record.modelId, status: record.status, lastEventTimestamp: record.lastEventTimestamp, updatedAt: record.updatedAt, state: JSON.parse(record.stateJson) })) }, { headers: { "Cache-Control": "no-store" } }); } catch (error) { return apiError(error, "Unable to load paper sessions"); } }
+
+export async function POST(request: Request) {
+  const auth = protectMutation(request); if (auth.response) return auth.response;
+  try {
+    const body = await readJson<CreateBody | ControlBody | CandleBody | ScanBody>(request, 5_000_000);
+    if (body.action === "create") { const model = importModelBundle(body.bundle); const sessionId = `paper_${stableHash(`${auth.email}:${model.id}:${Date.now()}`)}`; const configuration: PaperConfiguration & { bundle: ModelBundle } = { ...body.configuration, sessionId, modelId: model.id, modelVersion: model.version, bundle: body.bundle }; const state = initialPaperState(configuration); await savePaperSession(auth.email!, { id: sessionId, modelId: model.id, status: state.status, configuration, state }); await appendPaperEvent(sessionId, Date.now(), "session.created", model.version, { name: body.name || sessionId }); return Response.json({ sessionId, state }, { status: 201 }); }
+    const record = await getPaperSession(body.sessionId); if (!record) throw new Error("Unknown paper session"); const configuration = JSON.parse(record.configurationJson) as PaperConfiguration & { bundle: ModelBundle }; const state = JSON.parse(record.stateJson) as PaperState;
+    if(body.action==="scan"){if(state.status!=="running")throw new Error("Paper session is not running");const model=importModelBundle(configuration.bundle);const timeframe=configuration.timeframe as Timeframe;if(!(timeframe in TIMEFRAME_MILLISECONDS))throw new Error("Unsupported paper timeframe");const end=Date.now();const start=end-TIMEFRAME_MILLISECONDS[timeframe]*Math.max(100,configuration.bundle.manifest.warmupBars+10);const resolved=await resolveData({provider:configuration.provider??"binance-spot",marketType:configuration.marketType??"spot",symbol:configuration.symbol,timeframe,start,end});const candle=resolved.candles.at(-1);if(!candle)throw new Error("No new completed market candle is available");const configured=new Map(configuration.bundle.strategyConfigurations.map(item=>[String(item.id??""),item]));const features=model.featureNames.map(id=>{const plugin=requireStrategy(id);const item=configured.get(id);const signals=plugin.generate(resolved.candles,(item?.parameters as Record<string,string|number|boolean>|undefined)??{});return signals.at(-1)?.desiredExposure??0});const prediction=model.predict([features],[candle.timestamp])[0];const next=processCompletedCandle(configuration,state,candle,prediction);await savePaperSession(auth.email!,{id:record.id,modelId:record.modelId,status:next.status,configuration,state:next,lastEventTimestamp:next.lastTimestamp});await appendPaperEvent(record.id,candle.timestamp,"live-candle.processed",configuration.modelVersion,{datasetId:resolved.manifest.id,candle,features,prediction,trades:next.trades.slice(state.trades.length)});return Response.json({state:next,prediction,manifest:resolved.manifest});}
+    if (body.action === "candle") { const model = importModelBundle(configuration.bundle); if (body.features.length !== model.featureNames.length) throw new Error("Paper feature vector does not match the deployed model schema"); const prediction = model.predict([body.features], [body.candle.timestamp])[0]; const next = processCompletedCandle(configuration, state, body.candle, prediction); await savePaperSession(auth.email!, { id: record.id, modelId: record.modelId, status: next.status, configuration, state: next, lastEventTimestamp: next.lastTimestamp }); await appendPaperEvent(record.id, body.candle.timestamp, "candle.processed", configuration.modelVersion, { candle: body.candle, features: body.features, prediction, trades: next.trades.slice(state.trades.length) }); return Response.json({ state: next, prediction }); }
+    const next = transitionPaperState(state, body.action); await savePaperSession(auth.email!, { id: record.id, modelId: record.modelId, status: next.status, configuration, state: next, lastEventTimestamp: next.lastTimestamp }); await appendPaperEvent(record.id, Date.now(), `session.${body.action}`, configuration.modelVersion, {}); return Response.json({ state: next });
+  } catch (error) { return apiError(error, "Paper trading operation failed"); }
+}

@@ -14,7 +14,7 @@ import {
   type StrategyKey,
 } from "@/lib/analysisCatalog";
 import type { SignalCandle, StrategyContext } from "@/lib/signalEngine";
-import { DEFAULT_SIGNAL_CONFIG, type SignalConfig } from "@/lib/signalConfig";
+import { DEFAULT_SIGNAL_CONFIG, type SignalConfig, type SignalSide } from "@/lib/signalConfig";
 
 type Coin = {
   symbol: string;
@@ -1035,7 +1035,7 @@ export default function Home() {
 
   useEffect(() => {
     fetch("/api/signals/config", { cache: "no-store" })
-      .then((response) => response.json())
+      .then((response) => response.json() as Promise<{ config?: SignalConfig }>)
       .then((payload: { config?: SignalConfig }) => payload.config && setSignalConfig(payload.config))
       .catch(() => setSignalConfig(DEFAULT_SIGNAL_CONFIG));
     const saved = localStorage.getItem("tradepilot-universe");

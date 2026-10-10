@@ -1,0 +1,5 @@
+import { apiError, protectMutation, readJson } from "@/lib/platform/http";
+import { listModels, transitionModel } from "@/lib/platform/store";
+
+export async function GET() { try { const records = await listModels(); return Response.json({ models: records.map((record) => ({ ...record, bundleJson: undefined, metrics: JSON.parse(record.metricsJson) })) }, { headers: { "Cache-Control": "no-store" } }); } catch (error) { return apiError(error, "Unable to load models"); } }
+export async function PATCH(request: Request) { const auth = protectMutation(request); if (auth.response) return auth.response; try { const body = await readJson<{ id: string; status: "champion" | "challenger" | "rejected" | "archived"; reason: string }>(request); if (!body.reason?.trim()) throw new Error("A promotion or rejection reason is required"); await transitionModel(auth.email!, body.id, body.status, body.reason.trim()); return Response.json({ updated: true }); } catch (error) { return apiError(error, "Model transition failed"); } }
